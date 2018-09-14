@@ -9,6 +9,7 @@
 功能：
 """
 
+from django.db import models
 
 if __name__ == "__main__":
     pass

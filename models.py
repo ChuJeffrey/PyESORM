@@ -13,9 +13,7 @@ import datetime
 
 import es_exceptions
 from es_exceptions import InterruptError
-
-from bases import QuerySet
-
+from bases2 import DocQuerySet, C, ClsMgrMap
 
 class FieldForm(object):
     pass
@@ -46,7 +44,7 @@ class IntegerField(Field):
         self.check()
 
     def _check_max_length_warning(self):
-        if 0 < len(self.value) < 20:
+        if not (0 <= len(str(self.value)) < 20):
             es_exceptions.InterruptError("integer has invalid  max length")
 
     def to_python(self, value):
@@ -189,39 +187,69 @@ class DateTimeField(Field):
         self._check_datetime_str_type()
         self._check_datetime_type()
 
+
 # -------------------------------- Field end -----------------------------------
 
 
 # -------------------------------- Manager start ----------------------------------
 
-class BaseManager(object):
+class BaseManager(DocQuerySet):
     pass
 
 
 class Manager(BaseManager):
     pass
 
+
+
+
 # -------------------------------- Manager end -----------------------------------
 
-default_manager = Manager()
 
 
 # -------------------------------- Model start ------------------------------------
 
-class BaseModel(object):
+class ModelBase(type):
+    def __new__(cls, name, bases, attrs):
+        super_new = super(ModelBase, cls).__new__
+        # print cls.__name__, name, bases, attrs
+        attrs = attrs if attrs else {}
+        if "Meta" in attrs:
+            doc_type = attrs["Meta"].doc_type
+            attrs["objects"] = Manager(doc_type=doc_type)
+            subclass = super_new(cls, name, bases, attrs)
+            attrs["objects"].update_model_class(subclass)
+            ClsMgrMap.add_map(doc_type, subclass, Manager)
+        else:
+            subclass = super_new(cls, name, bases, attrs)
+        return subclass
 
+
+def with_metaclass(meta, *bases):  #
+    """Create a base class with a metaclass.
+    通过构造类获取构造类的实例以及对构造类的实例进行一些额外操作(目测是闭包的思想)
+    """
+
+    class metaclass(meta):
+        def __new__(cls, name, this_bases, d):
+            return meta(name, bases, d)
+    return type.__new__(metaclass, 'temporary_class', (), {})
+
+
+class Model(with_metaclass(ModelBase)):
     pass
-
-
-class Model(BaseModel):
-
-    @property
-    def objects(self):
-        return default_manager
 
 
 # -------------------------------- Model end -------------------------------------
 
+class TestModel(Model):
+    class Meta:
+        doc_type = "video_search"
+    video_title = TextField(default="1")
+    hot = IntegerField(default=0)
+
 
 if __name__ == "__main__":
-    m1 = Model.objects
+    m = TestModel.objects.filter(hot__lt=131)[1:5]
+    for r in m:
+        print r

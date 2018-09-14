@@ -15,164 +15,135 @@ import elasticsearch
 
 from es_exceptions import InterruptError
 
-from configs import ES_HOSTS
+from configs import ES_CONFIG
 
-es_connection = elasticsearch.Elasticsearch(
-    ES_HOSTS,
+default_conn = elasticsearch.Elasticsearch(
     sniff_on_start=True,
     sniff_on_connection_fail=True,
     sniffer_timeout=600,
-    timeout=60,
+    timeout=60, **(ES_CONFIG.get("default"))
 )
 
 
-class BaseManager(object):
-    """
-    连接池
-    """
-    pass
-
-
-class Compiler(object):
-    es_conn = es_connection
-
-    def execute_dsl(self, index_name, doc_type_list, condition, params):
-        results = self.es_conn.search(index=index_name, doc_type=self.to_doc_type_str(doc_type_list),
-                                      body=condition, params=params)
-        return results
-
-    @staticmethod
-    def to_doc_type_str(doc_type_list):
-        try:
-            return "/".join(doc_type_list)
-        except:
-            return "*"
+def get_es_default_params():
+    return ES_CONFIG.get("default")["alias_name"]
 
 
 class MatchType(object):
     MATCH_PHRASE = "match_phrase"
     MATCH = "match"
     MATCH_ALL = "match_all"
+    DEFAULT = MATCH_PHRASE
+
+
+class FilterType(object):
+    LTE = "lte"
+    GTE = "gte"
+    LT = "lt"
+    GT = "gt"
+    RANGE = "range"
+    IN = "in"
 
 
 class MatchOperator(object):
     MUST = "must"
     SHOULD = "should"
     MUST_NOT = "must_not"
+    DEFAULT = MUST
+
+
+class ClsMgrMap(object):
+    data = {
+
+    }
+    @classmethod
+    def add_map(cls, doc_type, model_class, manager):
+        cls.data[doc_type] = [model_class, manager]
+
+    @classmethod
+    def get_map_by_doc_type(cls, doc_type):
+        return cls.data.get(doc_type) or None, None
 
 
 class MatchNode(object):
     """最小条件"""
-    BASE_NODE = "leaf"
-    NODE = "node"
+    default = MatchOperator.DEFAULT
 
-    def __init__(self, node_type=None, operator=None, children=None, match_type=None, negated=False):
-        self.node_type = node_type or MatchNode.BASE_NODE
-        self.match_type = match_type or MatchType.MATCH_PHRASE
-        self.operator = operator
+    def __init__(self, children=None, operator=None, negated=False):
+
         self.children = children[:] if children else []
+        self.operator = operator or self.default
         self.negated = negated
 
-    def transform(self):
-        """
-        node = {
-            "operator": "must",
-            "match_type": "match_phrase",
-            "node_type": "node",
-            "children": [
-                {
-                    "operator": "must",
-                    "node_type": "leaf",
-                    "match_type": "match_phrase",
-                    "children": [
-                        {'a': 0},
-                        {'b': 200}
-                    ]
-                },
-                {
-                    "operator": "must",
-                    "node_type": "leaf",
-                    "match_type": "match",
-                    "children": [
-                        {'c': "韩后"},
-                        {'d': "xyz"}
-                    ]
-                }
-            ]
-        }
-        """
-        tree_data = {
-        }
-        if self.operator not in tree_data:
-            tree_data[self.operator] = []
-        if self.node_type == MatchNode.BASE_NODE:
-            tree_data[self.operator].extend(
-                [{self.match_type: data} for data in self.children])
-        else:
-            tree_data[self.operator].extend(
-                [{"bool": node.transform()} for node in self.children])
-        return tree_data
-
-    def add(self, node, operator):
-        if self.node_type != MatchNode.BASE_NODE:
-            if operator == MatchOperator.SHOULD:
-                # self.children.extend(node.children)
-                obj = self._new_instance(self.node_type, self.operator, self.children,
-                                         self.match_type, self.negated)
-                self.operator = operator
-                self.children = [obj, node]
-                self.node_type = MatchNode.NODE
-            else:
-                self.children.append(node)
-        else:  # 叶子变成父节点
-            obj = self._new_instance(self.node_type, self.operator, self.children,
-                                     self.match_type, self.negated)
-            self.operator = operator
-            self.children = [obj, node]
-            self.node_type = MatchNode.NODE
-
     @classmethod
-    def _new_instance(cls, node_type=None, operator=None, children=None,
-                      match_type=MatchType.MATCH_PHRASE, negated=False):
-        obj = MatchNode(node_type, operator, children, match_type, negated)
+    def _new_instance(cls, children=None, operator=None, negated=False):
+        obj = MatchNode(children, operator, negated)
         obj.__class__ = cls
         return obj
 
+    def __str__(self):
+        if self.negated:
+            return '(must_not (%s: %s))' % (
+                self.operator, ', '.join(str(c) for c in self.children))
+        return '(%s: %s)' % (self.operator, ', '.join(str(c) for c in self.children))
+
+    def __repr__(self):
+        return "<%s: %s>" % (self.__class__.__name__, self)
+
+    def __contains__(self, other):
+        """
+        Returns True is 'other' is a direct child of this instance.
+        """
+        return other in self.children
+
+    def __len__(self):
+        """
+        The size of a node if the number of children it has.
+        """
+        return len(self.children)
+
+    def add(self, node, operator, squash=True):
+        if node in self.children:
+            return node
+        if not squash:
+            self.children.append(node)
+            return node
+        if self.operator == operator:  # 运算符与当前节点的一致时
+
+            # 将与当前节点(self)同类型(同must或者同should)的、且不带must_not的单例集合进行横向合并进来
+            if (isinstance(node, MatchNode) and not node.negated and
+                    (node.operator == operator or len(node) == 1)):
+                self.children.extend(node.children)
+                return self
+            else:
+                # 将复杂集合进行标记，用后面的逻辑来遍历还原
+                self.children.append(node)
+                return node
+        else:  # 运算符与当前节点的不一致时, 则将自己变成儿子，自己改成新的运算符
+            obj = self._new_instance(self.children, self.operator, self.negated)
+            self.operator = operator
+            self.children = [obj, node]
+            return node
+
+    def negate(self):
+        """
+        Negate the sense of the root connector.
+        """
+        self.negated = not self.negated
+
 
 class C(MatchNode):
-    default_operator = MatchOperator.MUST
-
     def __init__(self, *args, **kwargs):
-        operator = kwargs.get("operator") or MatchOperator.MUST
-        match_type = kwargs.get("match_type") or MatchType.MATCH_PHRASE
-        node_type = kwargs.get("node_type") or MatchNode.NODE
-        negated = kwargs.get("negated") or False
-        children = kwargs.get("children")
-        kwargs.pop("operator") if "operator" in kwargs else None
-        kwargs.pop("match_type") if "match_type" in kwargs else None
-        kwargs.pop("node_type") if "node_type" in kwargs else None
-        kwargs.pop("negated") if "negated" in kwargs else None
-        kwargs.pop("children") if "children" in kwargs else None
-
-        if children is None:
-            children = list([arg for arg in args if isinstance(arg, self.__class__)]) + \
-                       [C(node_type=MatchNode.BASE_NODE, operator=operator,
-                          children=[{k: v} for k, v in kwargs.iteritems()],
-                          match_type=match_type, negated=negated)]
-        elif children is []:
-            children = []
-
-        super(C, self).__init__(node_type, operator, children, match_type, negated)
-        # self.operator = C.default_operator
+        super(C, self).__init__(children=list(args) + list(kwargs.iteritems()))
 
     def _combine(self, otherC, operator):
         if not isinstance(otherC, C):
             InterruptError("otherC is not a C")
-        # self.add(otherC, operator)
-        obj = self._clone()
+        obj = type(self)()
+        obj.operator = operator
+        obj.add(self, operator)
         obj.add(otherC, operator)
         return obj
-        # return self
 
     def __or__(self, other):
         return self._combine(other, MatchOperator.SHOULD)
@@ -182,194 +153,185 @@ class C(MatchNode):
 
     def __invert__(self):
         obj = type(self)()
-        obj.add(self, MatchOperator.MUST_NOT)
+        obj.add(self, MatchOperator.MUST)
+        obj.negate()
         return obj
 
-    def _clone(self, ):
-        return copy.deepcopy(self)
+    # def _clone(self, ):
+    #     return copy.deepcopy(self)
+
+    def _clone(self):
+        clone = self.__class__._new_instance(
+            children=[], operator=self.operator, negated=self.negated)
+        for child in self.children:  # 全面克隆
+            if hasattr(child, 'clone'):
+                clone.children.append(child.clone())
+            else:
+                clone.children.append(child)
+        return clone
+
+    def json(self):
+        return json.dumps(self.transform(self), indent=4)
+
+    @staticmethod
+    def transform(data):
+        query = {
+        }
+        if isinstance(data, tuple) or isinstance(data, C):
+            if isinstance(data, tuple):
+                return C.pack_match(data)
+            else:  # C object
+                bool_query = {}
+                for child in data.children:
+                    child_result = C.transform(child)
+                    if child_result:
+                        if data.operator in bool_query:
+                            bool_query[data.operator].append(child_result)
+                        else:
+                            bool_query[data.operator] = [child_result]
+                if data.negated:
+                    query["bool"] = {
+                        MatchOperator.MUST_NOT: {
+                            "bool": bool_query
+                        }
+                        if len(bool_query) != 1 else bool_query.items()[0][-1]  # todo 将多余的子集合移位
+                    }
+                else:
+                    query["bool"] = bool_query
+                if MatchOperator.SHOULD in query["bool"]:
+                    query["bool"]["minimum_should_match"] = 1
+        return query
+
+    @staticmethod
+    def pack_match(data):
+        """
+        打包转换成可用的es dsl
+        :param data: tuple: (k, v)
+        :return:
+        """
+        key, value = data
+        match_type, query = MatchType.MATCH_PHRASE, dict([data])
+        if "__" in key:
+            field, filter_type = "".join(key.split("__")[:-1]), key.split("__")[-1]
+            match_type = filter_type
+            if filter_type == MatchType.MATCH:
+                query = dict([(field, value)])
+                return {match_type: query}
+            elif filter_type in [FilterType.LTE, FilterType.LT, FilterType.GTE, FilterType.GT]:
+                query = {
+                    "range": {
+                        field: {
+                            filter_type: value,
+                        }
+                    }
+                }
+                return query
+            elif filter_type in [FilterType.IN]:
+                pass
+        else:
+            return {
+                match_type: query
+            }
 
 
-class ConditionCompiler(object):
-    default_condition_dict = {}
-    execution_list = {}
-    execution_result = {}
-    execution_id = 0
-
-    def __init__(self, model=None, compiler=None, condition_dict=None, query=None, sort_list=None):
-        self.model = model
+class DocQuerySet(object):
+    def __init__(self, model_class=None, es_conn=None, doc_type=None, condition=None, query=None, sort_list=None):
+        self.model_class = model_class or ClsMgrMap.get_map_by_doc_type(doc_type)
         if query:
             self.query = query
         else:
             self._init_query()
-        self.condition_dict = condition_dict or {"query": query}
-        self.compiler = compiler or Compiler()
-        self.bool = None
-        self.must_list = None
-        self.must_not_list = None
-        self.should_list = None
+        self.total = 0
+        self.condition = condition
         self.sort = sort_list or []
-        self._positions = []
-        self.node = C()
+        self._es_conn = es_conn or default_conn
         self.args = ()
         self.kwargs = {}
+        self.result = []
+        self.doc_type = doc_type
 
-    def bool(self, boost=None, **kwargs):
-        node = self.find_dsl_node()
-        if not isinstance(node, dict):
-            return "node is not a 'dict'"
-        if "bool" not in node:
-            node["bool"] = {}
-        self.add_postion("bool")
-        return self._clone()
+        self._alias_name = get_es_default_params()
 
-    def __getitem__(self, item):
-        if isinstance(item, int):
-            node = self.find_dsl_node()[item]
-            self.add_postion(item)
-            return self._clone()
-        else:
-            return super(ConditionCompiler, self).__getitem__(item)
+    def construct_condition(self, condition):
+        self.condition = condition
+        return self.condition
 
-    def add_postion(self, data):
-        self._positions.append(data)
-
-    def find_dsl_node(self):
-        condition = self.condition_dict
-        for _index in self._positions:
-            if isinstance(_index, int) or isinstance(_index, str):
-                condition = condition[_index]
-            else:
-                pass
-        return condition
+    def update_model_class(self, model_class):
+        self.model_class = model_class
 
     def filter(self, *args, **kwargs):
-
+        """
+        主此处filter
+        :param args:
+        :param kwargs:
+        :return:
+        """
         return self._filter_or_exclude(False, *args, **kwargs)
 
     def _filter_or_exclude(self, negated=False, *args, **kwargs):
-        for arg in args:
-            if isinstance(arg, C):
-                self.add_c(arg)
         if negated:
-            self.add_c(C(node_type=MatchNode.BASE_NODE, operator=MatchOperator.MUST_NOT,
-                         children=[{k: v} for k, v in kwargs.iteritems()],
-                         match_type=MatchType.MATCH_PHRASE, negated=negated),
-                       )
+            self.add_c(~C(*args, **kwargs))
         else:
-            self.add_c(C(a=1)
-                       )
+            self.add_c(C(*args, **kwargs))
         return self._clone()
 
     def exclude(self, *args, **kwargs):
-        # self._init_query_bool()
-        # must_condition = [{match_type: {field: value}} for field, value in kwargs.iteritems()]
-        # self.must_not_list.extend(must_condition)
-        # return self._clone()
         return self._filter_or_exclude(True, *args, **kwargs)
 
     def _init_query(self):
         self.query = {"match_all": {}}
 
-    def _init_query_bool(self):
-        if "bool" not in self.query:
-            self.must_list = []
-            self.must_not_list = []
-            self.should_list = []
-            self.bool = {
-                "must": self.must_list,
-                "must_not": self.must_not_list,
-                "should": self.should_list
-            }
-            self.query["bool"] = self.bool
-            self.remove_match_all()
-
     def remove_match_all(self):
         self.query.pop("match_all")
 
     def result(self):
-        return self.condition_dict
+        return self.condition
 
     def total(self):
         pass
 
+    def json(self):
+        return self.condition.json()
+
     def _clone(self, ):
-        return copy.deepcopy(self)
+        return self
 
     def clone(self):
         return self._clone()
 
     def add_c(self, c_object):
-        # if c_object.operator == MatchOperator.MUST:
-        #     # self._init_query_bool()
-        #     # must_condition = [
-        #     #     {c_object.match_type: {field: value}}
-        #     #     for field, value in c_object.kwargs.iteritems()
-        #     #     ]
-        #     # self.must_list.extend(must_condition)
-        #     # return self._clone()
-        #     self.node.add(c_object, operator=c_object.operator)
-        # elif c_object.operator == MatchOperator.MUST_NOT:
-        #     # self._init_query_bool()
-        #     # must_condition = [
-        #     #     {c_object.match_type: {field: value}}
-        #     #     for field, value in c_object.kwargs.iteritems()
-        #     #     ]
-        #     # self.must_not_list.extend(must_condition)
-        #     # return self._clone()
-        #     self.node.add(c_object, operator=c_object.operator)
-        # else:
-        self.node.add(c_object, operator=c_object.operator)
-
-
-class QuerySet(object):
-    """
-    docs operation
-    """
-    result = None
-
-    def __init__(self, model, condition, index_name, doc_type_list):
-        self.model = model
-        self.condition = condition or ConditionCompiler(self.model).result()
-        self.index_name = index_name
-        self.doc_type_list = doc_type_list
+        if self.condition:
+            self.condition.add(c_object, operator=MatchOperator.DEFAULT)
+        else:
+            self.condition = c_object
 
     def __iter__(self):
+        self.fetch_result()
         return iter(self.result)
 
-    def total(self):
-        return self.condition.total()
+    def fetch_result(self):
+        condition = self.complete_condition()
+        # print json.dumps(condition, indent=4)
+        results = self._es_conn.search(index=self._alias_name, doc_type=self.doc_type, body=condition)
+        self.result = results["hits"]["hits"]
+        self.total = results["hits"]["total"]
 
-    def must(self):
-        return self.condition.must()
+    def count(self):
+        return self.total
 
-    def clone(self):
-        return self._clone()
+    def complete_condition(self):
+        self.query = {
+            "query": self.condition.transform(self.condition)
+        }
+        return self.query
 
-    def filter(self):
-        return self._clone()
-
-    def must_not(self):
-        return self._clone()
-
-    def should(self):
-        return self._clone()
-
-    def _fetch_all(self):
-        if self.result is None:
-            self.result = list(self.iterator())
-
-    def iterator(self):
-        return []
-
-    def _set_up(self):
-        pass
-
-    def _clone(self, _class=None, ):
-        if _class is None:
-            _class = self.__class__
-        c = _class(model=self.model, condition=self.condition, index_name=self.index_name,
-                   doc_type_list=self.doc_type_list)
-        return c
+    def __getitem__(self, item):
+        if not self.result:
+            self.fetch_result()
+        if isinstance(item, int):
+            return self.result[item]
+        elif isinstance(item, slice):
+            return self.result[item]
 
 
 if __name__ == "__main__":
@@ -387,5 +349,5 @@ if __name__ == "__main__":
     # cc2 = c2 | c3
     # c = cc1 | cc2
     # print c.transform()
-    con = ConditionCompiler().filter(C(c=1) | C(d=22), a=1)
-    print json.dumps(con.node.transform())
+    con = DocQuerySet().filter(~(C(a__gt=1) | ~C(b=2, e=5))).filter(c=3, d=4).exclude(C(f=6) | C(g=7))
+    print con.complete_condition()
