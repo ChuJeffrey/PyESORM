@@ -15,6 +15,7 @@ import es_exceptions
 from es_exceptions import InterruptError
 from bases2 import DocQuerySet, C, ClsMgrMap
 
+
 class FieldForm(object):
     pass
 
@@ -201,8 +202,6 @@ class Manager(BaseManager):
     pass
 
 
-
-
 # -------------------------------- Manager end -----------------------------------
 
 
@@ -216,6 +215,12 @@ class ModelBase(type):
         attrs = attrs if attrs else {}
         if "Meta" in attrs:
             doc_type = attrs["Meta"].doc_type
+            concrete_fields = []
+            for field_name, field_model in attrs.iteritems():
+                if isinstance(field_model, Field):
+                    setattr(field_model, "attname", field_name)
+                    concrete_fields.append(field_model)
+            setattr(attrs["Meta"], "concrete_fields", concrete_fields)
             attrs["objects"] = Manager(doc_type=doc_type)
             subclass = super_new(cls, name, bases, attrs)
             attrs["objects"].update_model_class(subclass)
@@ -233,11 +238,15 @@ def with_metaclass(meta, *bases):  #
     class metaclass(meta):
         def __new__(cls, name, this_bases, d):
             return meta(name, bases, d)
+
     return type.__new__(metaclass, 'temporary_class', (), {})
 
 
 class Model(with_metaclass(ModelBase)):
-    pass
+    def __init__(self, *args, **kwargs):
+        for field_model in iter(self.Meta.concrete_fields):
+            setattr(self, field_model.attname, field_model.to_python(field_model.default))
+        super(Model, self).__init__(*args, **kwargs)
 
 
 # -------------------------------- Model end -------------------------------------
@@ -245,11 +254,13 @@ class Model(with_metaclass(ModelBase)):
 class TestModel(Model):
     class Meta:
         doc_type = "video_search"
+
     video_title = TextField(default="1")
     hot = IntegerField(default=0)
+    play_count = IntegerField(default=0)
 
 
 if __name__ == "__main__":
-    m = TestModel.objects.filter(hot__lt=131)[1:5]
+    m = TestModel.objects.filter(hot__lt=131).order_by("-play_count", "-hot")[:990]
     for r in m:
-        print r
+        print r.play_count, r.hot

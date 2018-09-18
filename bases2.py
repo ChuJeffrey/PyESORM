@@ -56,6 +56,7 @@ class ClsMgrMap(object):
     data = {
 
     }
+
     @classmethod
     def add_map(cls, doc_type, model_class, manager):
         cls.data[doc_type] = [model_class, manager]
@@ -237,22 +238,33 @@ class C(MatchNode):
 class DocQuerySet(object):
     def __init__(self, model_class=None, es_conn=None, doc_type=None, condition=None, query=None, sort_list=None):
         self.model_class = model_class or ClsMgrMap.get_map_by_doc_type(doc_type)
-        if query:
-            self.query = query
-        else:
-            self._init_query()
+
         self.total = 0
         self.condition = condition
-        self.sort = sort_list or []
         self._es_conn = es_conn or default_conn
         self.args = ()
         self.kwargs = {}
         self.result = []
+        self.result_field_names = []
         self.doc_type = doc_type
 
         self._alias_name = get_es_default_params()
+        self.dsl = {}
+        if query:
+            self.query = query
+        else:
+            self._init_query()
+        self.size = 10
+        self._from = 0
+        self.sort = sort_list or []
+        self.aggs = {}
 
     def construct_condition(self, condition):
+        """
+        构造查询条件
+        :param condition:
+        :return:
+        """
         self.condition = condition
         return self.condition
 
@@ -313,41 +325,73 @@ class DocQuerySet(object):
         condition = self.complete_condition()
         # print json.dumps(condition, indent=4)
         results = self._es_conn.search(index=self._alias_name, doc_type=self.doc_type, body=condition)
-        self.result = results["hits"]["hits"]
+        for doc in results["hits"]["hits"]:
+            if self.result_field_names:
+                doc_dict = {}
+                for field_name in self.result_field_names:
+                    doc_dict[field_name] = doc["_source"].get("field_name")
+                self.result.append(doc_dict)
+            else:
+
+                class_instance = self.model_class()
+                for field_model in self.model_class.Meta.concrete_fields:
+                    try:
+                        setattr(class_instance, field_model.attname, doc["_source"][field_model.attname])
+                    except KeyError:
+                        InterruptError("%s attribution is not exist in document" % (field_model.attname, ))
+                self.result.append(class_instance)
+
+        # self.result = results["hits"]["hits"]
         self.total = results["hits"]["total"]
 
     def count(self):
         return self.total
 
+    def values(self, *field_names):
+        obj = self._clone()
+        obj.result_field_names = field_names
+        return obj
+
     def complete_condition(self):
-        self.query = {
-            "query": self.condition.transform(self.condition)
+        self.dsl = {
+            "sort": self.sort,
+            "query": self.condition.transform(self.condition),
+            "from": self._from,
+            "size": self.size,
         }
-        return self.query
+        return self.dsl
+
+    def order_by(self, *field_names):
+        """
+        排序
+        :param field_names: 排序字段列表
+        :return:
+        """
+        obj = self._clone()
+        if "sort" in obj.condition:
+            obj.condition.pop("sort")
+        obj.sort = [
+            {field_name[1:]: {"order": "desc"}} if field_name[0] == "-" else {field_name: {"order": "asc"}}
+            for field_name in field_names
+            ]
+        if "score" not in field_names or "-score" not in field_names:
+            obj.sort.append({"_score": {"order": "desc"}})
+
+        return obj
 
     def __getitem__(self, item):
-        if not self.result:
-            self.fetch_result()
         if isinstance(item, int):
+            if not self.result:
+                self.fetch_result()
             return self.result[item]
         elif isinstance(item, slice):
-            return self.result[item]
+            self._from = item.start if item.start else 0
+            self.size = item.stop if item.stop else 0
+            if not self.result:
+                self.fetch_result()
+            return self.result
 
 
 if __name__ == "__main__":
-    # c1 = C(operator=MatchOperator.MUST, children=[{"d": 0}, {"e": 100}],
-    #        match_type=MatchType.MATCH)
-    # c2 = C(operator=MatchOperator.MUST, children=[{"f": 11}, {"g": 111}])
-    # c3 = C(operator=MatchOperator.MUST, children=[{"h": 23123}, {"i": 5465}],
-    #        match_type=MatchType.MATCH)
-    # cc1 = C(node_type=C.NODE, operator=MatchOperator.SHOULD, children=[c1, c2])
-    # cc2 = C(node_type=C.NODE, operator=MatchOperator.SHOULD, children=[c3, c2])
-    # c1 = C(d=0, e=0)
-    # c2 = C(d=1, e=1)
-    # c3 = C(d=2, e=2)
-    # cc1 = c1 | c2
-    # cc2 = c2 | c3
-    # c = cc1 | cc2
-    # print c.transform()
     con = DocQuerySet().filter(~(C(a__gt=1) | ~C(b=2, e=5))).filter(c=3, d=4).exclude(C(f=6) | C(g=7))
     print con.complete_condition()
