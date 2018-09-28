@@ -471,11 +471,7 @@ class DocQuerySet(object):
     #     return
 
 
-
     def set_aggregation_value(self, aggregations_results):
-        if self.group_by_list:
-            _result = {}
-            _result[]
         for aggregation in self.aggregation_list:
             if isinstance(aggregation, Aggregate):
                 field = aggregation.aggregation_field
