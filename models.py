@@ -9,11 +9,12 @@
 功能：
 """
 
+import json
 import datetime
 
 import es_exceptions
 from es_exceptions import InterruptError
-from bases2 import DocQuerySet, C, ClsMgrMap
+from bases2 import DocQuerySet, C, ClsMgrMap, Sum, Max, Min, Uni, Avg
 
 
 class FieldForm(object):
@@ -75,7 +76,7 @@ class IntegerField(Field):
 class KeywordField(Field):
     description = "Keyword"
 
-    def __init__(self, max_length=None, min_value=None, default=None, *args, **kwargs):
+    def __init__(self, max_length=None, *args, **kwargs):
         super(KeywordField, self).__init__(max_length=max_length, *args, **kwargs)
         self.check()
 
@@ -132,6 +133,35 @@ class TextField(Field):
             return InterruptError("default  value is not string type data")
 
 
+class JsonField(Field):
+    description = "Json"
+
+    def __init__(self, default=None, *args, **kwargs):
+        super(JsonField, self).__init__(default=default, *args, **kwargs)
+        self.check()
+
+    def to_python(self, value):
+        try:
+            json.loads(value)
+        except (TypeError, ValueError):
+            raise es_exceptions.ValidationError(
+                self.error_messages['invalid'],
+                code='invalid',
+                params={'value': value},
+            )
+        return value
+
+    def get_internal_type(self):
+        return "JsonField"
+
+    def get_prep_value(self):
+        return str(self.default)
+
+    def check(self):
+        if not isinstance(self.default, dict) and not isinstance(self.default, list):
+            return InterruptError("default  value is not dict or list type data")
+
+
 class DateTimeField(Field):
     description = "Text"
     DATETIME_TYPE = "datetime"
@@ -164,7 +194,7 @@ class DateTimeField(Field):
             )
 
     def get_internal_type(self):
-        return "TextField"
+        return "DateTimeField"
 
     def get_prep_value(self):
         return str(self.default)
@@ -258,9 +288,21 @@ class TestModel(Model):
     video_title = TextField(default="1")
     hot = IntegerField(default=0)
     play_count = IntegerField(default=0)
+    forward_count = IntegerField(default=0)
 
 
 if __name__ == "__main__":
-    m = TestModel.objects.filter(hot__lt=131).order_by("-play_count", "-hot")[:990]
-    for r in m:
-        print r.play_count, r.hot
+    t = TestModel.objects.filter(
+        hot__in=[1, 2, 300]). \
+        group_by("publisher_id"). \
+        aggregate(hm=Min("hot"),
+                  pm=Max("play_count"),
+                  vc=Avg("forward_count"))
+    print t.json()
+    print t["hm"], t["pm"], t["vc"]
+
+
+    # m = TestModel.objects.filter(hot__in=[4, 5, 6]).order_by("-play_count", "-hot")
+    # print m.condition.json()
+    # for r in m:
+    #     print r.play_count, r.hot

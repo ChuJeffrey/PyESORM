@@ -9,13 +9,14 @@
 功能： 核心
 """
 
-import json
+import collections
 import copy
 import elasticsearch
 
 from es_exceptions import InterruptError
 
 from configs import ES_CONFIG
+from six import *
 
 default_conn = elasticsearch.Elasticsearch(
     sniff_on_start=True,
@@ -172,7 +173,7 @@ class C(MatchNode):
         return clone
 
     def json(self):
-        return json.dumps(self.transform(self), indent=4)
+        return show_json(self.transform(self))
 
     @staticmethod
     def transform(data):
@@ -180,7 +181,7 @@ class C(MatchNode):
         }
         if isinstance(data, tuple) or isinstance(data, C):
             if isinstance(data, tuple):
-                return C.pack_match(data)
+                return C.pack_match(*data)
             else:  # C object
                 bool_query = {}
                 for child in data.children:
@@ -204,60 +205,163 @@ class C(MatchNode):
         return query
 
     @staticmethod
-    def pack_match(data):
+    def create_nested_query(value):
+        return
+
+    @staticmethod
+    def pack_match(*data_tuple):
         """
         打包转换成可用的es dsl
         :param data: tuple: (k, v)
         :return:
         """
-        key, value = data
-        match_type, query = MatchType.MATCH_PHRASE, dict([data])
+        key, data = data_tuple
+        match_type, query = MatchType.MATCH_PHRASE, dict([(key, data)])
+        if isinstance(data, dict):
+            query = {
+                "nested": {
+                    "path": key,
+                    "query": {
+                        "bool": {
+                            "must": [
+                                {
+                                    "match_phrase": {
+                                        k: {
+                                            "query": value
+                                        }
+                                    }
+                                }
+                                for k, value in data.iteritems()
+                                ]
+                        }
+                    }
+                }
+            }
+            return query
+
         if "__" in key:
             field, filter_type = "".join(key.split("__")[:-1]), key.split("__")[-1]
             match_type = filter_type
             if filter_type == MatchType.MATCH:
-                query = dict([(field, value)])
+                query = dict([(field, data)])
                 return {match_type: query}
             elif filter_type in [FilterType.LTE, FilterType.LT, FilterType.GTE, FilterType.GT]:
                 query = {
                     "range": {
                         field: {
-                            filter_type: value,
+                            filter_type: data,
                         }
                     }
                 }
                 return query
             elif filter_type in [FilterType.IN]:
-                pass
+                query = {
+                    "terms": {
+                        field: data
+                    }
+                }
+                return query
         else:
             return {
                 match_type: query
             }
 
 
+class Aggregate(object):
+    AGGREGATION_NAME = "aggs"
+
+    def __init__(self, field_name, *args, **kwargs):
+        self.field_name = field_name
+        self._dsl = {}
+        self.aggregation_field = concat_aggregate_name(self.field_name, self.AGGREGATION_NAME)
+        super(Aggregate, self).__init__()
+
+    def __repr__(self):
+        return "<%s: %s>" % (self.__class__.__name__, self)
+
+    def __str__(self):
+        return '(%s: %s)' % (self.AGGREGATION_NAME, self.dsl)
+
+    @property
+    def dsl(self):
+        self._dsl = {
+            self.aggregation_field: {
+                self.AGGREGATION_NAME: {
+                    "field": self.field_name
+                }
+            }
+        }
+        return self._dsl
+
+    @dsl.setter
+    def dsl(self, dsl):
+        self._dsl = dsl
+
+
+class Sum(Aggregate):
+    AGGREGATION_NAME = "sum"
+
+
+class Max(Aggregate):
+    AGGREGATION_NAME = "max"
+
+
+class Min(Aggregate):
+    AGGREGATION_NAME = "min"
+
+
+class Avg(Aggregate):
+    AGGREGATION_NAME = "avg"
+
+
+class Uni(Aggregate):
+    AGGREGATION_NAME = "cardinality"
+
+
+class GroupBy(Aggregate):
+    AGGREGATION_NAME = "group"
+
+    @property
+    def dsl(self):
+        if not self._dsl:
+            self._dsl = {
+                self.aggregation_field: {
+                    "terms": {
+                        "field": self.field_name,
+                        "size": 100
+                    }
+                }
+            }
+        return self._dsl
+
+    @dsl.setter
+    def dsl(self, dsl):
+        self._dsl = dsl
+
+
 class DocQuerySet(object):
+
     def __init__(self, model_class=None, es_conn=None, doc_type=None, condition=None, query=None, sort_list=None):
         self.model_class = model_class or ClsMgrMap.get_map_by_doc_type(doc_type)
-
         self.total = 0
         self.condition = condition
         self._es_conn = es_conn or default_conn
         self.args = ()
+        self.attrs = {}
+        self.dsl = {}
         self.kwargs = {}
         self.result = []
         self.result_field_names = []
         self.doc_type = doc_type
 
         self._alias_name = get_es_default_params()
-        self.dsl = {}
-        if query:
-            self.query = query
-        else:
-            self._init_query()
+        self.query = query
         self.size = 10
         self._from = 0
         self.sort = sort_list or []
-        self.aggs = {}
+        self.aggs_dsl = {}  # dsl
+        self.aggregation_list = []
+        self.group_by_list = []
 
     def construct_condition(self, condition):
         """
@@ -281,11 +385,12 @@ class DocQuerySet(object):
         return self._filter_or_exclude(False, *args, **kwargs)
 
     def _filter_or_exclude(self, negated=False, *args, **kwargs):
+        clone = self._clone()
         if negated:
-            self.add_c(~C(*args, **kwargs))
+            clone.add_c(~C(*args, **kwargs))
         else:
-            self.add_c(C(*args, **kwargs))
-        return self._clone()
+            clone.add_c(C(*args, **kwargs))
+        return clone
 
     def exclude(self, *args, **kwargs):
         return self._filter_or_exclude(True, *args, **kwargs)
@@ -303,10 +408,20 @@ class DocQuerySet(object):
         pass
 
     def json(self):
-        return self.condition.json()
+        return show_json(self.complete_condition())
 
-    def _clone(self, ):
-        return self
+    def _clone(self):
+        klass = self.__class__
+        instance = klass(self.model_class, es_conn=self._es_conn, doc_type=self.doc_type,
+                         condition=copy.deepcopy(self.condition), query=copy.deepcopy(self.query),
+                         sort_list=self.sort[:])
+        instance.size = self.size
+        instance._from = self._from
+        instance.dsl = copy.deepcopy(self.dsl)
+        instance.aggs_dsl = copy.deepcopy(self.aggs_dsl)
+        instance.aggregation_list = self.aggregation_list[:]
+        instance.group_by_list = copy.deepcopy(self.group_by_list)
+        return instance
 
     def clone(self):
         return self._clone()
@@ -323,7 +438,6 @@ class DocQuerySet(object):
 
     def fetch_result(self):
         condition = self.complete_condition()
-        # print json.dumps(condition, indent=4)
         results = self._es_conn.search(index=self._alias_name, doc_type=self.doc_type, body=condition)
         for doc in results["hits"]["hits"]:
             if self.result_field_names:
@@ -332,17 +446,46 @@ class DocQuerySet(object):
                     doc_dict[field_name] = doc["_source"].get("field_name")
                 self.result.append(doc_dict)
             else:
-
                 class_instance = self.model_class()
                 for field_model in self.model_class.Meta.concrete_fields:
                     try:
                         setattr(class_instance, field_model.attname, doc["_source"][field_model.attname])
                     except KeyError:
-                        InterruptError("%s attribution is not exist in document" % (field_model.attname, ))
+                        InterruptError("%s attribution is not exist in document" % (field_model.attname,))
                 self.result.append(class_instance)
 
-        # self.result = results["hits"]["hits"]
         self.total = results["hits"]["total"]
+        self.set_aggregation_value(results["aggregations"])
+
+    # @staticmethod
+    # def _get_group_by_result(group_by_list, aggregations_results, pack_results):
+    #     copy_group_by_list = copy.deepcopy(group_by_list)
+    #     for copy_group_by in copy_group_by_list:
+    #         pack_results[copy_group_by.aggregation_field] = {}
+    #         DocQuerySet._get_group_by_result(
+    #             copy_group_by_list[1:],
+    #             aggregations_results[copy_group_by.aggregation_field],
+    #             pack_results
+    #         )
+    #     pack_results
+    #     return
+
+
+
+    def set_aggregation_value(self, aggregations_results):
+        if self.group_by_list:
+            _result = {}
+            _result[]
+        for aggregation in self.aggregation_list:
+            if isinstance(aggregation, Aggregate):
+                field = aggregation.aggregation_field
+                if field in aggregations_results:
+                    value = aggregations_results[field]["value"]
+                else:
+                    value = None
+                if len(self.aggregation_list) == 1:
+                    self.attrs[self.aggregation_list[0].aggregation_field] = value
+                self.attrs[field] = value
 
     def count(self):
         return self.total
@@ -353,18 +496,20 @@ class DocQuerySet(object):
         return obj
 
     def complete_condition(self):
-        self.dsl = {
-            "sort": self.sort,
-            "query": self.condition.transform(self.condition),
-            "from": self._from,
-            "size": self.size,
-        }
+        _l = [
+            ("sort", self.sort),
+            ("query", self.condition.transform(self.condition)),
+            ("aggs", self.aggs_dsl),
+            ("from", self._from),
+            ("size", self.size),
+        ]
+        self.dsl = collections.OrderedDict(_l)
         return self.dsl
 
     def order_by(self, *field_names):
         """
         排序
-        :param field_names: 排序字段列表
+        :param field_names: 排序字段列表, 有“-”表示降序排序，无则升序排序
         :return:
         """
         obj = self._clone()
@@ -390,6 +535,61 @@ class DocQuerySet(object):
             if not self.result:
                 self.fetch_result()
             return self.result
+        elif isinstance(item, str):
+            if not self.result:
+                self.fetch_result()
+            return self.attrs.get(item)
+
+    def aggregate(self, *aggs, **kwargs):
+        # self.aggregation_list.extend(aggs)
+        """
+        {"hot_sum": {
+            "sum": {
+                "field": "hot"
+                }
+            }
+        }
+        """
+
+        # self.aggregation_list.extend(dict2tuples(kwargs))
+        """
+        (hot,
+        {"hot_sum": {
+            "sum": {
+                "field": "hot"
+                }
+            }
+        },)
+        """
+        obj = self._clone()
+        query_aggs = {}
+        for agg in aggs:
+            if isinstance(agg, Aggregate):
+                query_aggs.update(agg.dsl)
+                obj.aggregation_list.append(agg)
+        for new_field_name, sub_aggregate in kwargs.iteritems():
+            if isinstance(sub_aggregate, Aggregate):
+                # 重置字段别名
+                sub_aggregate.aggregation_field = new_field_name
+                query_aggs.update(sub_aggregate.dsl)
+                obj.aggregation_list.append(sub_aggregate)
+        _inner_aggs = find_last_aggregation(obj.aggs_dsl)
+        _inner_aggs.update(query_aggs)
+        return obj
+
+    def group_by(self, *field_names):
+        obj = self._clone()
+        for field_name in field_names:
+            g = GroupBy(field_name)
+            _inner_aggs = find_last_aggregation(obj.aggs_dsl)
+            copy_inner_aggs = copy.deepcopy(_inner_aggs)
+            _inner_aggs.clear()
+            g_dsl = copy.deepcopy(g.dsl)
+            g_dsl[g.aggregation_field]["aggs"] = copy_inner_aggs
+            g.dsl = g_dsl
+            _inner_aggs.update(g.dsl)
+            obj.group_by_list.append(g)
+        return obj
 
 
 if __name__ == "__main__":
