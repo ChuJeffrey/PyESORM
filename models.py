@@ -299,8 +299,8 @@ if __name__ == "__main__":
                   pm=Max("play_count"),
                   vc=Avg("forward_count"))
     print t.json()
-    print t["hm"], t["pm"], t["vc"]
-
+    for _t in t:
+        print _t
 
     # m = TestModel.objects.filter(hot__in=[4, 5, 6]).order_by("-play_count", "-hot")
     # print m.condition.json()

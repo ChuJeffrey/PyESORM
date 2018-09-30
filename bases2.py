@@ -362,6 +362,7 @@ class DocQuerySet(object):
         self.aggs_dsl = {}  # dsl
         self.aggregation_list = []
         self.group_by_list = []
+        self.group_by_result = {}
 
     def construct_condition(self, condition):
         """
@@ -457,32 +458,40 @@ class DocQuerySet(object):
         self.total = results["hits"]["total"]
         self.set_aggregation_value(results["aggregations"])
 
-    def _get_group_by_result(self, group_results, result_list):
-        # copy_group_by_list = copy.deepcopy(group_by_list)
-        # for copy_group_by in copy_group_by_list:
-        #     pack_results[copy_group_by.aggregation_field] = {}
-        #     DocQuerySet._get_group_by_result(
-        #         copy_group_by_list[1:],
-        #         aggregations_results[copy_group_by.aggregation_field],
-        #         pack_results
-        #     )
-        # return
+    def _set_group_by_result(self, group_results, output_result):
         for group_key, buckets in group_results.iteritems():
             if group_key.split("__")[-1] == "group":
                 for inner_group_results in group_results[group_key]["buckets"]:
-                    self._get_group_by_result(inner_group_results, result_list)
+                    if not isinstance(output_result, dict):
+                        output_result = dict()
+                    output_result[inner_group_results["key"]] = dict()
+                    self._set_group_by_result(inner_group_results, output_result[inner_group_results["key"]])
+            else:
+                if not isinstance(output_result, dict):
+                    output_result = dict()
+                for aggregation in self.aggregation_list:
+                    if isinstance(aggregation, Aggregate):
+                        field = aggregation.aggregation_field
+                        if field in group_results:
+                            value = group_results[field]["value"]
+                        else:
+                            value = None
+                        output_result[field] = value
 
     def set_aggregation_value(self, aggregations_results):
-        for aggregation in self.aggregation_list:
-            if isinstance(aggregation, Aggregate):
-                field = aggregation.aggregation_field
-                if field in aggregations_results:
-                    value = aggregations_results[field]["value"]
-                else:
-                    value = None
-                if len(self.aggregation_list) == 1:
-                    self.attrs[self.aggregation_list[0].aggregation_field] = value
-                self.attrs[field] = value
+        if self.group_by_list:
+            self._set_group_by_result(aggregations_results, self.group_by_result)
+        else:
+            for aggregation in self.aggregation_list:
+                if isinstance(aggregation, Aggregate):
+                    field = aggregation.aggregation_field
+                    if field in aggregations_results:
+                        value = aggregations_results[field]["value"]
+                    else:
+                        value = None
+                    if len(self.aggregation_list) == 1:
+                        self.attrs[self.aggregation_list[0].aggregation_field] = value
+                    self.attrs[field] = value
 
     def count(self):
         return self.total
