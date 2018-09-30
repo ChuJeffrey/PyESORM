@@ -457,19 +457,20 @@ class DocQuerySet(object):
         self.total = results["hits"]["total"]
         self.set_aggregation_value(results["aggregations"])
 
-    # @staticmethod
-    # def _get_group_by_result(group_by_list, aggregations_results, pack_results):
-    #     copy_group_by_list = copy.deepcopy(group_by_list)
-    #     for copy_group_by in copy_group_by_list:
-    #         pack_results[copy_group_by.aggregation_field] = {}
-    #         DocQuerySet._get_group_by_result(
-    #             copy_group_by_list[1:],
-    #             aggregations_results[copy_group_by.aggregation_field],
-    #             pack_results
-    #         )
-    #     pack_results
-    #     return
-
+    def _get_group_by_result(self, group_results, result_list):
+        # copy_group_by_list = copy.deepcopy(group_by_list)
+        # for copy_group_by in copy_group_by_list:
+        #     pack_results[copy_group_by.aggregation_field] = {}
+        #     DocQuerySet._get_group_by_result(
+        #         copy_group_by_list[1:],
+        #         aggregations_results[copy_group_by.aggregation_field],
+        #         pack_results
+        #     )
+        # return
+        for group_key, buckets in group_results.iteritems():
+            if group_key.split("__")[-1] == "group":
+                for inner_group_results in group_results[group_key]["buckets"]:
+                    self._get_group_by_result(inner_group_results, result_list)
 
     def set_aggregation_value(self, aggregations_results):
         for aggregation in self.aggregation_list:
@@ -590,4 +591,4 @@ class DocQuerySet(object):
 
 if __name__ == "__main__":
     con = DocQuerySet().filter(~(C(a__gt=1) | ~C(b=2, e=5))).filter(c=3, d=4).exclude(C(f=6) | C(g=7))
-    print con.complete_condition()
+    print con.json()

@@ -293,7 +293,7 @@ class TestModel(Model):
 
 if __name__ == "__main__":
     t = TestModel.objects.filter(
-        hot__in=[1, 2, 300]). \
+        hot__gt=0). \
         group_by("publisher_id"). \
         aggregate(hm=Min("hot"),
                   pm=Max("play_count"),
