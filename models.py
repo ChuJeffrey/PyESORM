@@ -14,7 +14,7 @@ import datetime
 
 import es_exceptions
 from es_exceptions import InterruptError
-from bases2 import DocQuerySet, C, ClsMgrMap, Sum, Max, Min, Uni, Avg
+from core import DocQuerySet, C, ClsMgrMap, Sum, Max, Min, Uni, Avg
 
 
 class FieldForm(object):
@@ -141,11 +141,9 @@ class JsonField(Field):
         self.check()
 
     def to_python(self, value):
-        try:
-            json.loads(value)
-        except (TypeError, ValueError):
+        if not isinstance(value, (dict, list)):
             raise es_exceptions.ValidationError(
-                self.error_messages['invalid'],
+                None,
                 code='invalid',
                 params={'value': value},
             )
@@ -292,17 +290,18 @@ class TestModel(Model):
 
 
 if __name__ == "__main__":
-    t = TestModel.objects.filter(
-        hot__gt=0). \
-        group_by("publisher_id"). \
-        aggregate(hm=Min("hot"),
-                  pm=Max("play_count"),
-                  vc=Avg("forward_count"))
-    print t.json()
-    for _t in t:
-        print _t
+    # t = TestModel.objects.filter(
+    #     hot__gt=0). \
+    #     group_by("publisher_id", "like_count"). \
+    #     aggregate(hm=Min("hot"),
+    #               pm=Max("play_count"),
+    #               vc=Avg("forward_count"))
+    # print t.groups("69228077034", 34)
+    # # print t.json()
+    # for _t in t:
+    #     print _t
 
-    # m = TestModel.objects.filter(hot__in=[4, 5, 6]).order_by("-play_count", "-hot")
-    # print m.condition.json()
-    # for r in m:
-    #     print r.play_count, r.hot
+    m = TestModel.objects.filter(hot__range=[0,  6]).order_by("-play_count", "-hot")
+    print m.json()
+    for r in m:
+        print r.play_count, r.hot

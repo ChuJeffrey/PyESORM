@@ -17,5 +17,6 @@ ES_CONFIG = {
         "hosts": ES_HOSTS,
         "auth": ES_HTTP_AUTH,
         "alias_name": "localhost_videos_alias"
+        # "alias_name": "test_list"
     }
 }

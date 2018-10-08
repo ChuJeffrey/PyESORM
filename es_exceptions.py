@@ -17,7 +17,7 @@ class ValidationError(Exception):
     def __init__(self, error_message=None, code='invalid', params=None):
         if code == "invalid":
             if isinstance(params, dict):
-                for k, v in params:
+                for k, v in params.iteritems():
                     print "(%s: %s) %s" % (k, v, error_message)
 
 

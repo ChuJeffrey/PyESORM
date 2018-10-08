@@ -44,6 +44,7 @@ class FilterType(object):
     GT = "gt"
     RANGE = "range"
     IN = "in"
+    RANGE = "range"
 
 
 class MatchOperator(object):
@@ -226,7 +227,7 @@ class C(MatchNode):
                             "must": [
                                 {
                                     "match_phrase": {
-                                        k: {
+                                        key + "." + k: {
                                             "query": value
                                         }
                                     }
@@ -258,6 +259,17 @@ class C(MatchNode):
                 query = {
                     "terms": {
                         field: data
+                    }
+                }
+                return query
+            elif filter_type in [FilterType.RANGE]:
+                start, end = list(data)
+                query = {
+                    "range": {
+                        field: {
+                            "gte": start,
+                            "lte": end
+                        }
                     }
                 }
                 return query
@@ -340,7 +352,6 @@ class GroupBy(Aggregate):
 
 
 class DocQuerySet(object):
-
     def __init__(self, model_class=None, es_conn=None, doc_type=None, condition=None, query=None, sort_list=None):
         self.model_class = model_class or ClsMgrMap.get_map_by_doc_type(doc_type)
         self.total = 0
@@ -438,6 +449,8 @@ class DocQuerySet(object):
         return iter(self.result)
 
     def fetch_result(self):
+        if self.result:
+            return self.result
         condition = self.complete_condition()
         results = self._es_conn.search(index=self._alias_name, doc_type=self.doc_type, body=condition)
         for doc in results["hits"]["hits"]:
@@ -456,7 +469,8 @@ class DocQuerySet(object):
                 self.result.append(class_instance)
 
         self.total = results["hits"]["total"]
-        self.set_aggregation_value(results["aggregations"])
+        if self.aggs_dsl:
+            self.set_aggregation_value(results["aggregations"])
 
     def _set_group_by_result(self, group_results, output_result):
         for group_key, buckets in group_results.iteritems():
@@ -596,6 +610,13 @@ class DocQuerySet(object):
             _inner_aggs.update(g.dsl)
             obj.group_by_list.append(g)
         return obj
+
+    def groups(self, *args):
+        self.fetch_result()
+        _result = self.group_by_result
+        for key in args:
+            _result = _result[key]
+        return _result
 
 
 if __name__ == "__main__":

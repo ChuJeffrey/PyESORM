@@ -13,7 +13,7 @@ import json
 
 
 def show_json(_dict):
-    return json.dumps(_dict, indent=4)
+    return json.dumps(_dict, indent=2)
 
 
 def find_last_aggregation(tree):
