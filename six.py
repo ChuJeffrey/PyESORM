@@ -9,11 +9,22 @@
 功能：
 """
 
+import datetime
 import json
 
 
+class CJsonEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime.datetime):
+            return obj.strftime('%Y-%m-%dT%H:%M:%S')
+        elif isinstance(obj, datetime.date):
+            return obj.strftime('%Y-%m-%d')
+        else:
+            return json.JSONEncoder.default(self, obj)
+
+
 def show_json(_dict):
-    return json.dumps(_dict, indent=2)
+    return json.dumps(_dict, indent=2,cls=CJsonEncoder)
 
 
 def find_last_aggregation(tree):

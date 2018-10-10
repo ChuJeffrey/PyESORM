@@ -9,13 +9,11 @@
 功能：
 """
 
-import json
 import datetime
 
 import es_exceptions
 from es_exceptions import InterruptError
-from core import DocQuerySet, C, ClsMgrMap, Sum, Max, Min, Uni, Avg
-
+from core import DocQuerySet, C, ClsMgrMap, Sum, Max, Min, Uni, Avg, DEFAULT_ES_CONN_NAME, DEFAULT_DOC_TYPE
 
 class FieldForm(object):
     pass
@@ -35,6 +33,9 @@ class Field(object):
 
     def check(self):
         raise NotImplementedError
+
+    def get_prep_value(self):
+        return self.to_python(self.default)
 
 
 class IntegerField(Field):
@@ -64,12 +65,42 @@ class IntegerField(Field):
     def get_internal_type(self):
         return "IntegerField"
 
-    def get_prep_value(self):
-        return int(self.default)
-
     def check(self):
         if not isinstance(self.default, int):
             return InterruptError("default  value is not integer type data")
+        self._check_max_length_warning()
+
+
+class LongField(Field):
+    description = "Long"
+
+    def __init__(self, max_length=None, min_value=None, default=None, *args, **kwargs):
+        super(LongField, self).__init__(max_length=max_length, min_value=min_value,
+                                           default=default, *args, **kwargs)
+        self.check()
+
+    def _check_max_length_warning(self):
+        if not (0 <= len(str(self.value)) < 20):
+            es_exceptions.InterruptError("integer has invalid  max length")
+
+    def to_python(self, value):
+        if value is None:
+            return value
+        try:
+            return long(value)
+        except (TypeError, ValueError):
+            raise es_exceptions.ValidationError(
+                self.error_messages['invalid'],
+                code='invalid',
+                params={'value': value},
+            )
+
+    def get_internal_type(self):
+        return "LongField"
+
+    def check(self):
+        if not isinstance(self.get_prep_value(), long):
+            return InterruptError("default  value is not long type data")
         self._check_max_length_warning()
 
 
@@ -95,12 +126,9 @@ class KeywordField(Field):
     def get_internal_type(self):
         return "KeywordField"
 
-    def get_prep_value(self):
-        return str(self.default)
-
     def check(self):
-        if not isinstance(self.default, str):
-            return InterruptError("default  value is not string type data")
+        if not isinstance(self.get_prep_value(), str):
+            return InterruptError("default value is not string type data")
 
 
 class TextField(Field):
@@ -125,11 +153,8 @@ class TextField(Field):
     def get_internal_type(self):
         return "TextField"
 
-    def get_prep_value(self):
-        return str(self.default)
-
     def check(self):
-        if not isinstance(self.default, str):
+        if not isinstance(self.get_prep_value(), str):
             return InterruptError("default  value is not string type data")
 
 
@@ -156,7 +181,7 @@ class JsonField(Field):
         return str(self.default)
 
     def check(self):
-        if not isinstance(self.default, dict) and not isinstance(self.default, list):
+        if not isinstance(self.get_prep_value(), dict) and not isinstance(self.get_prep_value(), list):
             return InterruptError("default  value is not dict or list type data")
 
 
@@ -194,9 +219,6 @@ class DateTimeField(Field):
     def get_internal_type(self):
         return "DateTimeField"
 
-    def get_prep_value(self):
-        return str(self.default)
-
     def _check_datetime_type(self):
         if isinstance(self.default, datetime.datetime):
             return True
@@ -211,10 +233,9 @@ class DateTimeField(Field):
                 return InterruptError("datetime_str can not cast to datetime")
 
     def check(self):
-        if not self.default:
-            return InterruptError("datetime default value should not be none")
-        self._check_datetime_str_type()
-        self._check_datetime_type()
+        if self.default :
+            self._check_datetime_str_type()
+            self._check_datetime_type()
 
 
 # -------------------------------- Field end -----------------------------------
@@ -239,20 +260,34 @@ class Manager(BaseManager):
 class ModelBase(type):
     def __new__(cls, name, bases, attrs):
         super_new = super(ModelBase, cls).__new__
-        # print cls.__name__, name, bases, attrs
         attrs = attrs if attrs else {}
         if "Meta" in attrs:
-            doc_type = attrs["Meta"].doc_type
-            concrete_fields = []
-            for field_name, field_model in attrs.iteritems():
-                if isinstance(field_model, Field):
-                    setattr(field_model, "attname", field_name)
-                    concrete_fields.append(field_model)
-            setattr(attrs["Meta"], "concrete_fields", concrete_fields)
-            attrs["objects"] = Manager(doc_type=doc_type)
-            subclass = super_new(cls, name, bases, attrs)
-            attrs["objects"].update_model_class(subclass)
-            ClsMgrMap.add_map(doc_type, subclass, Manager)
+            if "objects" not in attrs:
+                if not hasattr(attrs["Meta"], "doc_type"):
+                    setattr(attrs["Meta"], "doc_type", DEFAULT_DOC_TYPE)
+                doc_type = attrs["Meta"].doc_type
+                if not hasattr(attrs["Meta"], "es_conn_name"):
+                    setattr(attrs["Meta"], "es_conn_name", DEFAULT_ES_CONN_NAME)
+                es_conn_name = attrs["Meta"].es_conn_name
+                attrs["objects"] = Manager(es_conn_name=es_conn_name, doc_type=doc_type)
+                concrete_fields = []
+                for field_name, field_model in attrs.iteritems():
+                    if isinstance(field_model, Field):
+                        setattr(field_model, "attname", field_name)
+                        concrete_fields.append(field_model)
+                setattr(attrs["Meta"], "concrete_fields", concrete_fields)
+                subclass = super_new(cls, name, bases, attrs)
+                attrs["objects"].update_model_class(subclass)
+                ClsMgrMap.add_map(es_conn_name, doc_type, subclass, Manager)
+            else:
+                concrete_fields = []
+                for field_name, field_model in attrs.iteritems():
+                    if isinstance(field_model, Field):
+                        setattr(field_model, "attname", field_name)
+                        concrete_fields.append(field_model)
+                setattr(attrs["Meta"], "concrete_fields", concrete_fields)
+                subclass = super_new(cls, name, bases, attrs)
+                attrs["objects"].update_model_class(subclass)
         else:
             subclass = super_new(cls, name, bases, attrs)
         return subclass
@@ -304,4 +339,4 @@ if __name__ == "__main__":
     m = TestModel.objects.filter(hot__range=[0,  6]).order_by("-play_count", "-hot")
     print m.json()
     for r in m:
-        print r.play_count, r.hot
+        print r.play_count, r.hot, r.id

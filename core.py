@@ -13,7 +13,7 @@ import collections
 import copy
 import elasticsearch
 
-from es_exceptions import InterruptError
+from es_exceptions import InterruptError, MissWarning
 
 from configs import ES_CONFIG
 from six import *
@@ -26,8 +26,25 @@ default_conn = elasticsearch.Elasticsearch(
 )
 
 
+def get_es_conn(es_conn_name):
+    return elasticsearch.Elasticsearch(
+        sniff_on_start=True,
+        sniff_on_connection_fail=True,
+        sniffer_timeout=600,
+        timeout=60, **(ES_CONFIG.get(es_conn_name))
+    )
+
+
+DEFAULT_ES_CONN_NAME = "default"
+DEFAULT_DOC_TYPE = "default_search"
+
+
 def get_es_default_params():
     return ES_CONFIG.get("default")["alias_name"]
+
+
+def get_es_params(es_conn_name):
+    return ES_CONFIG.get(es_conn_name)["alias_name"]
 
 
 class MatchType(object):
@@ -44,7 +61,7 @@ class FilterType(object):
     GT = "gt"
     RANGE = "range"
     IN = "in"
-    RANGE = "range"
+    EXISTS = "exists"
 
 
 class MatchOperator(object):
@@ -60,12 +77,12 @@ class ClsMgrMap(object):
     }
 
     @classmethod
-    def add_map(cls, doc_type, model_class, manager):
-        cls.data[doc_type] = [model_class, manager]
+    def add_map(cls, es_conn_name, doc_type, model_class, manager):
+        cls.data[es_conn_name + " " + doc_type] = [model_class, manager]
 
     @classmethod
-    def get_map_by_doc_type(cls, doc_type):
-        return cls.data.get(doc_type) or None, None
+    def get_map(cls, es_conn_name, doc_type):
+        return cls.data.get(es_conn_name + " " + doc_type) or None, None
 
 
 class MatchNode(object):
@@ -273,6 +290,14 @@ class C(MatchNode):
                     }
                 }
                 return query
+            elif filter_type == FilterType.EXISTS:
+                if data is True:
+                    query = {
+                        "exists": {
+                            "field": field
+                        }
+                    }
+                return query
         else:
             return {
                 match_type: query
@@ -352,11 +377,11 @@ class GroupBy(Aggregate):
 
 
 class DocQuerySet(object):
-    def __init__(self, model_class=None, es_conn=None, doc_type=None, condition=None, query=None, sort_list=None):
-        self.model_class = model_class or ClsMgrMap.get_map_by_doc_type(doc_type)
+    def __init__(self, model_class=None, es_conn_name=None, doc_type=None, condition=None, query=None, sort_list=None):
+        self.model_class = model_class or ClsMgrMap.get_map(es_conn_name, doc_type)[0]
         self.total = 0
+        self._es_conn_name = es_conn_name
         self.condition = condition
-        self._es_conn = es_conn or default_conn
         self.args = ()
         self.attrs = {}
         self.dsl = {}
@@ -365,7 +390,7 @@ class DocQuerySet(object):
         self.result_field_names = []
         self.doc_type = doc_type
 
-        self._alias_name = get_es_default_params()
+        self._alias_name = get_es_params(es_conn_name)
         self.query = query
         self.size = 10
         self._from = 0
@@ -396,6 +421,9 @@ class DocQuerySet(object):
         """
         return self._filter_or_exclude(False, *args, **kwargs)
 
+    def all(self):
+        return self._clone()
+
     def _filter_or_exclude(self, negated=False, *args, **kwargs):
         clone = self._clone()
         if negated:
@@ -407,8 +435,8 @@ class DocQuerySet(object):
     def exclude(self, *args, **kwargs):
         return self._filter_or_exclude(True, *args, **kwargs)
 
-    def _init_query(self):
-        self.query = {"match_all": {}}
+    def get_default_query(self):
+        return {"match_all": {}}
 
     def remove_match_all(self):
         self.query.pop("match_all")
@@ -416,15 +444,12 @@ class DocQuerySet(object):
     def result(self):
         return self.condition
 
-    def total(self):
-        pass
-
     def json(self):
         return show_json(self.complete_condition())
 
     def _clone(self):
         klass = self.__class__
-        instance = klass(self.model_class, es_conn=self._es_conn, doc_type=self.doc_type,
+        instance = klass(self.model_class, es_conn_name=self._es_conn_name, doc_type=self.doc_type,
                          condition=copy.deepcopy(self.condition), query=copy.deepcopy(self.query),
                          sort_list=self.sort[:])
         instance.size = self.size
@@ -448,11 +473,14 @@ class DocQuerySet(object):
         self.fetch_result()
         return iter(self.result)
 
+    def _cur_conn(self):
+        return get_es_conn(self._es_conn_name) or default_conn
+
     def fetch_result(self):
         if self.result:
             return self.result
         condition = self.complete_condition()
-        results = self._es_conn.search(index=self._alias_name, doc_type=self.doc_type, body=condition)
+        results = self._cur_conn().search(index=self._alias_name, doc_type=self.doc_type, body=condition)
         for doc in results["hits"]["hits"]:
             if self.result_field_names:
                 doc_dict = {}
@@ -461,11 +489,13 @@ class DocQuerySet(object):
                 self.result.append(doc_dict)
             else:
                 class_instance = self.model_class()
+                setattr(class_instance, "id", doc["_id"])
                 for field_model in self.model_class.Meta.concrete_fields:
                     try:
                         setattr(class_instance, field_model.attname, doc["_source"][field_model.attname])
                     except KeyError:
-                        InterruptError("%s attribution is not exist in document" % (field_model.attname,))
+                        pass
+                        # MissWarning("%s attribution is not exist in document" % (field_model.attname,))
                 self.result.append(class_instance)
 
         self.total = results["hits"]["total"]
@@ -508,6 +538,7 @@ class DocQuerySet(object):
                     self.attrs[field] = value
 
     def count(self):
+        self.fetch_result()
         return self.total
 
     def values(self, *field_names):
@@ -518,7 +549,7 @@ class DocQuerySet(object):
     def complete_condition(self):
         _l = [
             ("sort", self.sort),
-            ("query", self.condition.transform(self.condition)),
+            ("query", self.condition.transform(self.condition) if self.condition else self.get_default_query()),
             ("aggs", self.aggs_dsl),
             ("from", self._from),
             ("size", self.size),
@@ -550,11 +581,12 @@ class DocQuerySet(object):
                 self.fetch_result()
             return self.result[item]
         elif isinstance(item, slice):
-            self._from = item.start if item.start else 0
-            self.size = item.stop if item.stop else 0
-            if not self.result:
-                self.fetch_result()
-            return self.result
+            _instance = self._clone()
+            start = item.start if item.start else 0
+            end = item.stop if item.stop else 0
+            _instance._from, _instance.size = start, (end - start)
+            _instance.fetch_result()
+            return _instance
         elif isinstance(item, str):
             if not self.result:
                 self.fetch_result()

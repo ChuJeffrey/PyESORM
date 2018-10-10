@@ -25,3 +25,8 @@ class InterruptError(object):
     def __init__(self, error_messages=None):
         print "%s" % error_messages
         raise
+
+
+class MissWarning(object):
+    def __init__(self, error_messages=None):
+        print "%s" % error_messages
