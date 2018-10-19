@@ -23,8 +23,11 @@ class ValidationError(Exception):
 
 class InterruptError(object):
     def __init__(self, error_messages=None):
-        print "%s" % error_messages
-        raise
+        try:
+            print "%s" % error_messages
+
+        except:
+            raise
 
 
 class MissWarning(object):

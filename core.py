@@ -273,11 +273,31 @@ class C(MatchNode):
                 }
                 return query
             elif filter_type in [FilterType.IN]:
-                query = {
-                    "terms": {
-                        field: data
+                # todo 这里可能会还是用terms会比较好或者在后面版本加多一个filtered的用法
+                # query = {
+                #     "terms": {
+                #         field: data
+                #     }
+                # }
+                if data:
+                    query = {
+                        "bool": {
+                            "minimum_should_match": 1,
+                            "should": [
+                                {
+                                    "match_phrase": {
+                                        field: _d
+                                    }
+                                } for _d in data
+                                ]
+                        }
                     }
-                }
+                else:
+                    query = {
+                        "terms": {
+                            field: []
+                        }
+                    }
                 return query
             elif filter_type in [FilterType.RANGE]:
                 start, end = list(data)
@@ -307,7 +327,7 @@ class C(MatchNode):
 class Aggregate(object):
     AGGREGATION_NAME = "aggs"
 
-    def __init__(self, field_name, *args, **kwargs):
+    def __init__(self, field_name):
         self.field_name = field_name
         self._dsl = {}
         self.aggregation_field = concat_aggregate_name(self.field_name, self.AGGREGATION_NAME)
@@ -376,6 +396,41 @@ class GroupBy(Aggregate):
         self._dsl = dsl
 
 
+class RangeBy(Aggregate):
+    AGGREGATION_NAME = "range"
+
+    def __init__(self, field_name, keyed=False, *ranges):
+        super(RangeBy, self).__init__(field_name)
+        self.range_list = ranges
+        self.keyed = keyed
+
+    @property
+    def dsl(self):
+        ranges = []
+        for t in self.range_list:
+            if self.keyed:  # 有自定义key
+                _range = {"key": t[0], "from": t[1], "to": t[2]} if len(t) == 3 else {"from": t[1]}
+            else:
+                _range = {"from": t[0], "to": t[1]} if len(t) == 2 else {"from": t[0]}
+            ranges.append(
+                _range
+            )
+        if not self._dsl:
+            self._dsl = {
+                self.aggregation_field: {
+                    "range": {
+                        "field": self.field_name,
+                        "ranges": ranges
+                    }
+                }
+            }
+        return self._dsl
+
+    @dsl.setter
+    def dsl(self, dsl):
+        self._dsl = dsl
+
+
 class DocQuerySet(object):
     def __init__(self, model_class=None, es_conn_name=None, doc_type=None, condition=None, query=None, sort_list=None):
         self.model_class = model_class or ClsMgrMap.get_map(es_conn_name, doc_type)[0]
@@ -387,6 +442,7 @@ class DocQuerySet(object):
         self.dsl = {}
         self.kwargs = {}
         self.result = []
+        self.has_result = False
         self.result_field_names = []
         self.doc_type = doc_type
 
@@ -473,13 +529,19 @@ class DocQuerySet(object):
         self.fetch_result()
         return iter(self.result)
 
+    def __repr__(self):
+        """预览数据"""
+        self.fetch_result()
+        return repr(self.result)
+
     def _cur_conn(self):
         return get_es_conn(self._es_conn_name) or default_conn
 
-    def fetch_result(self):
-        if self.result:
-            return self.result
+    def fetch_result(self, force=False):
+        if not force and self.has_result:
+            return
         condition = self.complete_condition()
+        print show_json(condition)
         results = self._cur_conn().search(index=self._alias_name, doc_type=self.doc_type, body=condition)
         for doc in results["hits"]["hits"]:
             if self.result_field_names:
@@ -501,10 +563,12 @@ class DocQuerySet(object):
         self.total = results["hits"]["total"]
         if self.aggs_dsl:
             self.set_aggregation_value(results["aggregations"])
+        self.has_result = True
 
     def _set_group_by_result(self, group_results, output_result):
         for group_key, buckets in group_results.iteritems():
-            if group_key.split("__")[-1] == "group":
+            if group_key.split("__")[-1] == GroupBy.AGGREGATION_NAME \
+                    or group_key.split("__")[-1] == RangeBy.AGGREGATION_NAME:
                 for inner_group_results in group_results[group_key]["buckets"]:
                     if not isinstance(output_result, dict):
                         output_result = dict()
@@ -515,6 +579,7 @@ class DocQuerySet(object):
                     output_result = dict()
                 for aggregation in self.aggregation_list:
                     if isinstance(aggregation, Aggregate):
+                        output_result["doc_count"] = group_results["doc_count"]
                         field = aggregation.aggregation_field
                         if field in group_results:
                             value = group_results[field]["value"]
@@ -535,7 +600,8 @@ class DocQuerySet(object):
                         value = None
                     if len(self.aggregation_list) == 1:
                         self.attrs[self.aggregation_list[0].aggregation_field] = value
-                    self.attrs[field] = value
+                    # self.attrs[field] = value
+                    self.group_by_result[field] = value
 
     def count(self):
         self.fetch_result()
@@ -602,17 +668,6 @@ class DocQuerySet(object):
             }
         }
         """
-
-        # self.aggregation_list.extend(dict2tuples(kwargs))
-        """
-        (hot,
-        {"hot_sum": {
-            "sum": {
-                "field": "hot"
-                }
-            }
-        },)
-        """
         obj = self._clone()
         query_aggs = {}
         for agg in aggs:
@@ -641,6 +696,19 @@ class DocQuerySet(object):
             g.dsl = g_dsl
             _inner_aggs.update(g.dsl)
             obj.group_by_list.append(g)
+        return obj
+
+    def range_by(self, field_name, keyed=False, *args):
+        obj = self._clone()
+        rb = RangeBy(field_name, keyed, *args)
+        _inner_aggs = find_last_aggregation(obj.aggs_dsl)
+        copy_inner_aggs = copy.deepcopy(_inner_aggs)
+        _inner_aggs.clear()
+        rb_dsl = copy.deepcopy(rb.dsl)
+        rb_dsl[rb.aggregation_field]["aggs"] = copy_inner_aggs
+        rb.dsl = rb_dsl
+        _inner_aggs.update(rb.dsl)
+        obj.group_by_list.append(rb)
         return obj
 
     def groups(self, *args):

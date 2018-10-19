@@ -309,7 +309,15 @@ class Model(with_metaclass(ModelBase)):
     def __init__(self, *args, **kwargs):
         for field_model in iter(self.Meta.concrete_fields):
             setattr(self, field_model.attname, field_model.to_python(field_model.default))
+        self.id = 0
         super(Model, self).__init__(*args, **kwargs)
+
+    def __repr__(self):
+        return "<%s: %s>" % (self.__class__.__name__, self.id)
+
+    @property
+    def pk(self):
+        return self.id
 
 
 # -------------------------------- Model end -------------------------------------
@@ -325,18 +333,18 @@ class TestModel(Model):
 
 
 if __name__ == "__main__":
-    # t = TestModel.objects.filter(
-    #     hot__gt=0). \
-    #     group_by("publisher_id", "like_count"). \
-    #     aggregate(hm=Min("hot"),
-    #               pm=Max("play_count"),
-    #               vc=Avg("forward_count"))
-    # print t.groups("69228077034", 34)
-    # # print t.json()
-    # for _t in t:
-    #     print _t
+    t = TestModel.objects.filter(
+        hot__gt=0). \
+        group_by("publisher_id", "like_count"). \
+        aggregate(hm=Min("hot"),
+                  pm=Max("play_count"),
+                  vc=Avg("forward_count"))
+    print t.groups("69228077034", 34)
+    # print t.json()
+    for _t in t:
+        print _t
 
-    m = TestModel.objects.filter(hot__range=[0,  6]).order_by("-play_count", "-hot")
-    print m.json()
-    for r in m:
-        print r.play_count, r.hot, r.id
+    # m = TestModel.objects.filter(hot__range=[0,  6]).order_by("-play_count", "-hot")
+    # print m.json()
+    # for r in m:
+    #     print r.play_count, r.hot, r.id

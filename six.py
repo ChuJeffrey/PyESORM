@@ -32,7 +32,7 @@ def find_last_aggregation(tree):
         return find_last_aggregation(tree["aggs"])
     else:
         for kw, value in tree.iteritems():
-            if kw.split("__")[-1] == "group":
+            if kw.split("__")[-1] == "group" or kw.split("__")[-1] == "range":
                 return find_last_aggregation(value["aggs"])
         return tree
 
